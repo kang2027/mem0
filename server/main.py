@@ -4,14 +4,17 @@ import secrets
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
 from mem0 import Memory
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 # Load environment variables
 load_dotenv()
@@ -40,7 +43,24 @@ POSTGRES_USER = os.environ.get("POSTGRES_USER", "postgres")
 POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "postgres")
 POSTGRES_COLLECTION_NAME = os.environ.get("POSTGRES_COLLECTION_NAME", "memories")
 
+NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://neo4j:7687")
+NEO4J_USERNAME = os.environ.get("NEO4J_USERNAME", "neo4j")
+NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "mem0graph")
+
+MEMGRAPH_URI = os.environ.get("MEMGRAPH_URI", "bolt://localhost:7687")
+MEMGRAPH_USERNAME = os.environ.get("MEMGRAPH_USERNAME", "memgraph")
+MEMGRAPH_PASSWORD = os.environ.get("MEMGRAPH_PASSWORD", "mem0graph")
+
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_API_BASE_URL = os.environ.get("OPENAI_API_BASE_URL", "https://api.openai.com/v1")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-nano-2025-04-14")
+
+EMBEDDING_API_KEY = os.environ.get("EMBEDDING_API_KEY", OPENAI_API_KEY)
+EMBEDDING_API_BASE_URL = os.environ.get("EMBEDDING_API_BASE_URL", OPENAI_API_BASE_URL)
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
+EMBEDDING_MODEL_DIMS = int(os.environ.get("EMBEDDING_MODEL_DIMS", 1536))
+
+
 HISTORY_DB_PATH = os.environ.get("HISTORY_DB_PATH", "/app/history/history.db")
 
 DEFAULT_CONFIG = {
@@ -54,10 +74,35 @@ DEFAULT_CONFIG = {
             "user": POSTGRES_USER,
             "password": POSTGRES_PASSWORD,
             "collection_name": POSTGRES_COLLECTION_NAME,
+            "embedding_model_dims": EMBEDDING_MODEL_DIMS,
         },
     },
-    "llm": {"provider": "openai", "config": {"api_key": OPENAI_API_KEY, "temperature": 0.2, "model": "gpt-4.1-nano-2025-04-14"}},
-    "embedder": {"provider": "openai", "config": {"api_key": OPENAI_API_KEY, "model": "text-embedding-3-small"}},
+    "graph_store": {
+        "provider": "neo4j",
+        "config": {
+            "url": NEO4J_URI,
+            "username": NEO4J_USERNAME,
+            "password": NEO4J_PASSWORD,
+        },
+    },
+    "llm": {
+        "provider": "openai",
+        "config": {
+            "api_key": OPENAI_API_KEY,
+            "openai_base_url": OPENAI_API_BASE_URL,
+            "temperature": 0.2,
+            "model": OPENAI_MODEL,
+        },
+    },
+    "embedder": {
+        "provider": "openai",
+        "config": {
+            "api_key": EMBEDDING_API_KEY,
+            "openai_base_url": EMBEDDING_API_BASE_URL,
+            "model": EMBEDDING_MODEL,
+            "embedding_dims": EMBEDDING_MODEL_DIMS,
+        },
+    },
     "history_db_path": HISTORY_DB_PATH,
 }
 
@@ -107,9 +152,15 @@ class MemoryCreate(BaseModel):
     agent_id: Optional[str] = None
     run_id: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
-    infer: Optional[bool] = Field(None, description="Whether to extract facts from messages. Defaults to True.")
-    memory_type: Optional[str] = Field(None, description="Type of memory to store (e.g. 'core').")
-    prompt: Optional[str] = Field(None, description="Custom prompt to use for fact extraction.")
+    infer: Optional[bool] = Field(
+        None, description="Whether to extract facts from messages. Defaults to True."
+    )
+    memory_type: Optional[str] = Field(
+        None, description="Type of memory to store (e.g. 'core')."
+    )
+    prompt: Optional[str] = Field(
+        None, description="Custom prompt to use for fact extraction."
+    )
 
 
 class MemoryUpdate(BaseModel):
@@ -123,12 +174,18 @@ class SearchRequest(BaseModel):
     run_id: Optional[str] = None
     agent_id: Optional[str] = None
     filters: Optional[Dict[str, Any]] = None
-    top_k: Optional[int] = Field(None, description="Maximum number of results to return.")
-    threshold: Optional[float] = Field(None, description="Minimum similarity score for results.")
+    top_k: Optional[int] = Field(
+        None, description="Maximum number of results to return."
+    )
+    threshold: Optional[float] = Field(
+        None, description="Minimum similarity score for results."
+    )
 
 
 @app.post("/configure", summary="Configure Mem0")
-def set_config(config: Dict[str, Any], _api_key: Optional[str] = Depends(verify_api_key)):
+def set_config(
+    config: Dict[str, Any], _api_key: Optional[str] = Depends(verify_api_key)
+):
     """Set memory configuration."""
     global MEMORY_INSTANCE
     MEMORY_INSTANCE = Memory.from_config(config)
@@ -136,18 +193,66 @@ def set_config(config: Dict[str, Any], _api_key: Optional[str] = Depends(verify_
 
 
 @app.post("/memories", summary="Create memories")
-def add_memory(memory_create: MemoryCreate, _api_key: Optional[str] = Depends(verify_api_key)):
+def add_memory(
+    memory_create: MemoryCreate, _api_key: Optional[str] = Depends(verify_api_key)
+):
     """Store new memories."""
     if not any([memory_create.user_id, memory_create.agent_id, memory_create.run_id]):
-        raise HTTPException(status_code=400, detail="At least one identifier (user_id, agent_id, run_id) is required.")
+        raise HTTPException(
+            status_code=400,
+            detail="At least one identifier (user_id, agent_id, run_id) is required.",
+        )
 
-    params = {k: v for k, v in memory_create.model_dump().items() if v is not None and k != "messages"}
+    params = {
+        k: v
+        for k, v in memory_create.model_dump().items()
+        if v is not None and k != "messages"
+    }
     try:
-        response = MEMORY_INSTANCE.add(messages=[m.model_dump() for m in memory_create.messages], **params)
+        response = MEMORY_INSTANCE.add(
+            messages=[m.model_dump() for m in memory_create.messages], **params
+        )
         return JSONResponse(content=response)
     except Exception as e:
         logging.exception("Error in add_memory:")  # This will log the full traceback
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def process_memory_add(messages, params):
+    """Background task to process memory addition."""
+    try:
+        MEMORY_INSTANCE.add(messages=messages, **params)
+    except Exception as e:
+        logging.exception("Error in process_memory_add:")
+
+
+@app.post("/messages", summary="Add messages")
+async def add_messages(
+    memory_create: MemoryCreate,
+    background_tasks: BackgroundTasks,
+    _api_key: Optional[str] = Depends(verify_api_key),
+):
+    """Store new memories."""
+    if not any([memory_create.user_id, memory_create.agent_id, memory_create.run_id]):
+        raise HTTPException(
+            status_code=400,
+            detail="At least one identifier (user_id, agent_id, run_id) is required.",
+        )
+
+    params = {
+        k: v
+        for k, v in memory_create.model_dump().items()
+        if v is not None and k != "messages"
+    }
+
+    # Add the memory processing to background tasks
+    background_tasks.add_task(
+        process_memory_add,
+        messages=[m.model_dump() for m in memory_create.messages],
+        params=params,
+    )
+
+    return JSONResponse(content={"message": "Messages addition queued successfully"})
 
 
 @app.get("/memories", summary="Get memories")
@@ -159,10 +264,18 @@ def get_all_memories(
 ):
     """Retrieve stored memories."""
     if not any([user_id, run_id, agent_id]):
-        raise HTTPException(status_code=400, detail="At least one identifier is required.")
+        raise HTTPException(
+            status_code=400, detail="At least one identifier is required."
+        )
     try:
         params = {
-            k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v is not None
+            k: v
+            for k, v in {
+                "user_id": user_id,
+                "run_id": run_id,
+                "agent_id": agent_id,
+            }.items()
+            if v is not None
         }
         return MEMORY_INSTANCE.get_all(**params)
     except Exception as e:
@@ -181,10 +294,16 @@ def get_memory(memory_id: str, _api_key: Optional[str] = Depends(verify_api_key)
 
 
 @app.post("/search", summary="Search memories")
-def search_memories(search_req: SearchRequest, _api_key: Optional[str] = Depends(verify_api_key)):
+def search_memories(
+    search_req: SearchRequest, _api_key: Optional[str] = Depends(verify_api_key)
+):
     """Search for memories based on a query."""
     try:
-        params = {k: v for k, v in search_req.model_dump().items() if v is not None and k != "query"}
+        params = {
+            k: v
+            for k, v in search_req.model_dump().items()
+            if v is not None and k != "query"
+        }
         return MEMORY_INSTANCE.search(query=search_req.query, **params)
     except Exception as e:
         logging.exception("Error in search_memories:")
@@ -192,7 +311,11 @@ def search_memories(search_req: SearchRequest, _api_key: Optional[str] = Depends
 
 
 @app.put("/memories/{memory_id}", summary="Update a memory")
-def update_memory(memory_id: str, updated_memory: MemoryUpdate, _api_key: Optional[str] = Depends(verify_api_key)):
+def update_memory(
+    memory_id: str,
+    updated_memory: MemoryUpdate,
+    _api_key: Optional[str] = Depends(verify_api_key),
+):
     """Update an existing memory with new content.
 
     Args:
@@ -203,7 +326,11 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _api_key: Option
         dict: Success message indicating the memory was updated
     """
     try:
-        return MEMORY_INSTANCE.update(memory_id=memory_id, data=updated_memory.text, metadata=updated_memory.metadata)
+        return MEMORY_INSTANCE.update(
+            memory_id=memory_id,
+            data=updated_memory.text,
+            metadata=updated_memory.metadata,
+        )
     except Exception as e:
         logging.exception("Error in update_memory:")
         raise HTTPException(status_code=500, detail=str(e))
@@ -239,10 +366,18 @@ def delete_all_memories(
 ):
     """Delete all memories for a given identifier."""
     if not any([user_id, run_id, agent_id]):
-        raise HTTPException(status_code=400, detail="At least one identifier is required.")
+        raise HTTPException(
+            status_code=400, detail="At least one identifier is required."
+        )
     try:
         params = {
-            k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v is not None
+            k: v
+            for k, v in {
+                "user_id": user_id,
+                "run_id": run_id,
+                "agent_id": agent_id,
+            }.items()
+            if v is not None
         }
         MEMORY_INSTANCE.delete_all(**params)
         return {"message": "All relevant memories deleted"}
@@ -266,3 +401,9 @@ def reset_memory(_api_key: Optional[str] = Depends(verify_api_key)):
 def home():
     """Redirect to the OpenAPI documentation."""
     return RedirectResponse(url="/docs")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)

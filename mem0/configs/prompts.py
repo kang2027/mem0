@@ -12,6 +12,17 @@ Guidelines:
 Here are the details of the task:
 """
 
+MEMORY_ANSWER_PROMPT_ZH = """
+你是基于所提供的记忆回答问题的专家。你的任务是利用记忆中的信息，对问题提供准确且简洁的答案。
+
+Guidelines：
+- 根据问题从记忆中提取相关信息。
+- 如果没有找到相关信息，确保不要说没有找到信息，而是接受问题并提供一般性回应。
+- 确保答案清晰、简洁，并直接回答问题。
+
+以下是任务的详细信息：
+"""
+
 FACT_RETRIEVAL_PROMPT = f"""You are a Personal Information Organizer, specialized in accurately storing facts, user memories, and preferences. Your primary role is to extract relevant pieces of information from conversations and organize them into distinct, manageable facts. This allows for easy retrieval and personalization in future interactions. Below are the types of information you need to focus on and the detailed instructions on how to handle the input data.
 
 Types of Information to Remember:
@@ -403,11 +414,12 @@ You are a memory summarization system that records and preserves the complete in
 """
 
 
-def get_update_memory_messages(retrieved_old_memory_dict, response_content, custom_update_memory_prompt=None):
+def get_update_memory_messages(
+    retrieved_old_memory_dict, response_content, custom_update_memory_prompt=None
+):
     if custom_update_memory_prompt is None:
         global DEFAULT_UPDATE_MEMORY_PROMPT
         custom_update_memory_prompt = DEFAULT_UPDATE_MEMORY_PROMPT
-
 
     if retrieved_old_memory_dict:
         current_memory_part = f"""
@@ -1034,8 +1046,12 @@ def generate_additive_extraction_prompt(
 
     sections = []
     sections.append(f"## Summary\n{_format_summary(summary)}")
-    sections.append(f"## Last k Messages\n{_format_conversation_history(last_k_messages)}")
-    sections.append(f"## Recently Extracted Memories\n{_serialize_memories(recently_extracted_memories)}")
+    sections.append(
+        f"## Last k Messages\n{_format_conversation_history(last_k_messages)}"
+    )
+    sections.append(
+        f"## Recently Extracted Memories\n{_serialize_memories(recently_extracted_memories)}"
+    )
     sections.append(f"## Existing Memories\n{_serialize_memories(existing_memories)}")
     sections.append(f"## New Messages\n{_format_new_messages(new_messages)}")
     sections.append(f"## Observation Date\n{observation_date}")
